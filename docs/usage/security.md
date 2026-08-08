@@ -529,21 +529,6 @@ ensure that only trusted principals can submit work to the cluster:
 - Place the Ray cluster on an isolated network segment.
 - Do not expose the Ray client port or dashboard to untrusted networks.
 
-## NIXL Disaggregated Serving: Multi-Prompt Limitation
-
-In disaggregated serving deployments using NIXL (Prefill/Decode workers behind
-`vllm-router`), multi-prompt `/v1/completions` requests — where the `prompt`
-field is a `list[str]` — are rejected when `kv_transfer_params` is present.
-
-The Router forwards a single KV descriptor from the Prefill response to the
-Decode worker. If the request contained multiple prompts with different block
-counts, the Decode worker would encounter a block-count mismatch during KV
-transfer setup. To prevent this from crashing the worker, the API layer now
-returns HTTP 400 for such requests.
-
-**Workaround:** Submit each prompt as a separate single-prompt request. This is
-compatible with all disaggregated serving configurations.
-
 ## Reporting Security Vulnerabilities
 
 If you believe you have found a security vulnerability in vLLM, please report it following the project's security policy. For more information on how to report security issues and the project's security policy, please see the [vLLM Security Policy](https://github.com/vllm-project/vllm/blob/main/SECURITY.md).
