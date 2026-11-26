@@ -10,6 +10,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 GUARDED_PREFIX = ("/v1", "/v2", "/inference", "/cohere")
+GUARDED_PATHS = frozenset({"/pooling", "/pooling/"})
 
 
 class AuthenticationMiddleware:
@@ -20,7 +21,7 @@ class AuthenticationMiddleware:
         There are two cases in which authentication is skipped:
 
         1. The HTTP method is OPTIONS.
-        2. The request path doesn't start with GUARDED_PREFIX (e.g. /health).
+        2. The request path matches neither GUARDED_PREFIX nor GUARDED_PATHS.
 
     """
 
@@ -58,7 +59,8 @@ class AuthenticationMiddleware:
         url_path = get_route_path(scope)
         headers = Headers(scope=scope)
         # Type narrow to satisfy mypy.
-        if url_path.startswith(GUARDED_PREFIX) and not self.verify_token(headers):
+        requires_auth = url_path.startswith(GUARDED_PREFIX) or url_path in GUARDED_PATHS
+        if requires_auth and not self.verify_token(headers):
             response = JSONResponse(content={"error": "Unauthorized"}, status_code=401)
             return response(scope, receive, send)
         return self.app(scope, receive, send)

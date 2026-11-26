@@ -13,6 +13,7 @@ from starlette.testclient import TestClient
 
 from vllm.entrypoints.launchers.api_server.routers import register_api_routers
 from vllm.entrypoints.serve.middleware.authenticate import (
+    GUARDED_PATHS,
     GUARDED_PREFIX,
     AuthenticationMiddleware,
 )
@@ -109,7 +110,9 @@ def test_auto_discovered_protected_routes_require_auth(task_routes):
     client = TestClient(app)
 
     for path_template, methods in routes:
-        if not path_template.startswith(GUARDED_PREFIX):
+        if not path_template.startswith(GUARDED_PREFIX) and path_template not in (
+            GUARDED_PATHS
+        ):
             continue
 
         test_path = generate_test_path(path_template)
@@ -143,7 +146,7 @@ def test_auto_discovered_unprotected_routes_no_auth(task_routes):
     client = TestClient(app)
 
     for path_template, methods in routes:
-        if path_template.startswith(GUARDED_PREFIX):
+        if path_template.startswith(GUARDED_PREFIX) or path_template in GUARDED_PATHS:
             continue
 
         test_path = generate_test_path(path_template)
@@ -243,10 +246,12 @@ def test_root_path_non_segment_prefix_does_not_bypass_auth(
     [
         ("/api", "/api/v1/models"),
         ("/proxy", "/proxy/v1/chat/completions"),
+        ("/proxy", "/proxy/pooling"),
     ],
     ids=[
         "root=/api,path=/api/v1/models",
         "root=/proxy,path=/proxy/v1/chat/completions",
+        "root=/proxy,path=/proxy/pooling",
     ],
 )
 def test_root_path_segment_boundary_still_guards(root_path: str, request_path: str):
@@ -255,6 +260,7 @@ def test_root_path_segment_boundary_still_guards(root_path: str, request_path: s
     routes = [
         ("/v1/models", ["GET"]),
         ("/v1/chat/completions", ["POST"]),
+        ("/pooling", ["POST"]),
     ]
     app = _create_app_with_root_path(root_path, routes)
     client = TestClient(app, root_path=root_path)

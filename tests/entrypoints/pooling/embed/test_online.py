@@ -139,6 +139,41 @@ async def client(server):
         yield async_client
 
 
+def test_pooling_with_api_key():
+    api_key = "test-pooling-key"
+    args = [
+        "--runner",
+        "pooling",
+        "--dtype",
+        DTYPE,
+        "--enforce-eager",
+        "--max-model-len",
+        "512",
+        "--api-key",
+        api_key,
+        *ROCM_DETERMINISM_ARGS,
+    ]
+    with RemoteOpenAIServer(MODEL_NAME, args) as server:
+        url = server.url_for("/pooling")
+        payload = {"model": MODEL_NAME, "input": input_text}
+        response = requests.post(
+            url,
+            json=payload,
+            headers={"Authorization": "Bearer invalid-key"},
+            timeout=10,
+        )
+        assert response.status_code == 401
+
+        response = requests.post(
+            url,
+            json=payload,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        assert len(PoolingResponse.model_validate(response.json()).data) == 1
+
+
 @pytest.fixture(scope="module")
 def hf_model(hf_runner):
     with hf_runner(MODEL_NAME, dtype=DTYPE, is_sentence_transformer=True) as hf_model:
