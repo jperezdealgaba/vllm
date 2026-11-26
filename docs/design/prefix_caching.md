@@ -27,8 +27,10 @@ In the example above, the KV cache in the first block can be uniquely identified
     For `vllm serve`, you can control the hashing algorithm via `--prefix-caching-hash-algo`:
     - `sha256` (default): Uses Python's `pickle` for serialization. Hashes may not be reproducible across different Python or vLLM versions.
     - `sha256_cbor`: Uses `cbor2` for serialization, providing a reproducible, cross-language compatible hash. This is recommended for deterministic caching across environments.
-    - `xxhash`: Uses Pickle serialization with xxHash (128-bit) for faster, non-cryptographic hashing. Requires the optional `xxhash` package. IMPORTANT: Use of a hashing algorithm that is not considered cryptographically secure theoretically increases the risk of hash collisions, which can cause undefined behavior or even leak private information in multi-tenant environments. Even if collisions are still very unlikely, it is important to consider your security risk tolerance against the performance benefits before turning this on.
-    - `xxhash_cbor` combines canonical CBOR serialization with xxHash for reproducible hashing. Requires the optional `xxhash` package.    
+    - `xxhash`: Uses Pickle serialization with xxHash (128-bit) for faster hashing. Requires the optional `xxhash` package.
+    - `xxhash_cbor`: Uses canonical CBOR serialization with xxHash. Requires the optional `xxhash` package.
+
+    Use `sha256` or `sha256_cbor` when serving untrusted callers or sharing a cache across trust boundaries. The xxHash options are faster non-cryptographic alternatives for trusted workloads. With either xxHash option, vLLM uses a random per-process root seed when `PYTHONHASHSEED` is unset. For reproducible cache keys across instances, prefer `sha256_cbor`.
 
 **A hashing example with multi-modality inputs**  
 In this example, we illustrate how prefix caching works with multi-modality inputs (e.g., images). Assuming we have a request with the following messages:
