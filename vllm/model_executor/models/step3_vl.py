@@ -7,11 +7,10 @@ from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
@@ -59,19 +58,23 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
-from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
+from .vision import (
+    InterpolatedPosEmbedCache,
+    interpolate_cls_abs_pos,
+    is_vit_use_data_parallel,
+    run_dp_sharded_vision_model,
+)
 
 
 class Step3VLImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height
-        - w: Width
-        - bnp: Batch size * number of images * number of patches
-        - hp: Height of patch
-        - wp: Width of patch
+    """Dimensions:
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height
+    - w: Width
+    - bnp: Batch size * number of images * number of patches
+    - hp: Height of patch
+    - wp: Width of patch
     """
 
     type: Literal["pixel_values"]
@@ -81,11 +84,10 @@ class Step3VLImagePixelInputs(TensorSchema):
 
 
 class Step3VLImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - f: Image feature size
-        - h: Hidden size (must match the hidden size of language model backbone)
+    """Dimensions:
+    - bn: Batch size * number of images
+    - f: Image feature size
+    - h: Hidden size (must match the hidden size of language model backbone)
     """
 
     type: Literal["image_embeds"] = "image_embeds"
@@ -141,19 +143,16 @@ class Step3VLDummyInputsBuilder(BaseDummyInputsBuilder[Step3VLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
-        num_images = mm_counts.get("image", 0)
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
@@ -211,36 +210,12 @@ class Step3VLMultiModalProcessor(BaseMultiModalProcessor[Step3VLProcessingInfo])
         )
 
 
-def get_abs_pos(abs_pos, tgt_size):
-    dim = abs_pos.size(-1)
-    abs_pos_new = abs_pos.squeeze(0)
-    cls_token, old_pos_embed = abs_pos_new[:1], abs_pos_new[1:]
-
-    src_size = int(math.sqrt(abs_pos_new.shape[0] - 1))
-    tgt_size = int(math.sqrt(tgt_size))
-    dtype = abs_pos.dtype
-
-    if src_size != tgt_size:
-        old_pos_embed = (
-            old_pos_embed.view(1, src_size, src_size, dim)
-            .permute(0, 3, 1, 2)
-            .contiguous()
-        )
-        old_pos_embed = old_pos_embed.to(torch.float32)
-        new_pos_embed = F.interpolate(
-            old_pos_embed,
-            size=(tgt_size, tgt_size),
-            mode="bicubic",
-            antialias=True,
-            align_corners=False,
-        ).to(dtype)
-        new_pos_embed = new_pos_embed.permute(0, 2, 3, 1)
-        new_pos_embed = new_pos_embed.view(tgt_size * tgt_size, dim)
-        vision_pos_embed = torch.cat([cls_token, new_pos_embed], dim=0)
-        vision_pos_embed = vision_pos_embed.view(1, tgt_size * tgt_size + 1, dim)
-        return vision_pos_embed
-    else:
-        return abs_pos
+def get_abs_pos(abs_pos: torch.Tensor, tgt_size: int) -> torch.Tensor:
+    src_size = int(math.sqrt(abs_pos.squeeze(0).shape[0] - 1))
+    tgt_grid = int(math.sqrt(tgt_size))
+    if src_size != tgt_grid:
+        return interpolate_cls_abs_pos(abs_pos, tgt_grid)
+    return abs_pos
 
 
 class Step3VisionEmbeddings(nn.Module):
@@ -272,6 +247,22 @@ class Step3VisionEmbeddings(nn.Module):
             torch.arange(self.num_patches + 1).expand((1, -1)),
             persistent=False,
         )
+        self._abs_pos_cache = InterpolatedPosEmbedCache()
+
+    def _get_pos_embed(self, tgt_size: int) -> torch.Tensor:
+        weight = self.position_embedding.weight
+        src_size = int(math.sqrt(weight.shape[0] - 1))
+        tgt_grid = int(math.sqrt(tgt_size))
+        if src_size == tgt_grid:
+            return self.position_embedding(self.position_ids)
+        return self._abs_pos_cache.get_or_compute(
+            weight, tgt_grid, interpolate_cls_abs_pos
+        )
+
+    def process_weights_after_loading(self) -> None:
+        self._abs_pos_cache.refresh(
+            self.position_embedding.weight, interpolate_cls_abs_pos
+        )
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         batch_size = pixel_values.shape[0]
@@ -283,9 +274,7 @@ class Step3VisionEmbeddings(nn.Module):
         # pad
         class_embeds = self.class_embedding.expand(batch_size, 1, -1)
         embeddings = torch.cat([class_embeds, patch_embeds], dim=1)
-        embeddings = embeddings + get_abs_pos(
-            self.position_embedding(self.position_ids), patch_embeds.size(1)
-        )
+        embeddings = embeddings + self._get_pos_embed(patch_embeds.size(1))
         embeddings = torch.cat(
             [
                 embeddings[:, 0, :].unsqueeze(1).repeat(1, self.pad_tp_size - 1, 1),
@@ -297,7 +286,7 @@ class Step3VisionEmbeddings(nn.Module):
 
 
 class Step3VisionAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
+    """Multi-headed attention from 'Attention Is All You Need' paper."""
 
     def __init__(
         self,
@@ -350,7 +339,7 @@ class Step3VisionAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ):
-        """Input shape: Batch x Time x Channel"""
+        """Input shape: Batch x Time x Channel."""
         bsz, tgt_len, _ = hidden_states.size()
 
         # get query proj
@@ -908,8 +897,8 @@ class Step3VLForConditionalGeneration(
     ):
         """CPU-side per-item merge after dual-path graph replay.
 
-        ``outputs['global']`` contains global-image features and ``outputs['local']``
-        contains local-patch features (or ``None`` when there are no patches).
+        `outputs['global']` contains global-image features and `outputs['local']`
+        contains local-patch features (or `None` when there are no patches).
         """
         output = outputs["global"]
         local_output = outputs.get("local")
@@ -940,7 +929,11 @@ class Step3VLForConditionalGeneration(
                 parts.append(patch_part[cur_patch : cur_patch + np].reshape(-1, hidden))
                 cur_patch += np
             parts.append(global_part[i].reshape(-1, hidden))
-            merged[idx] = torch.cat(parts, dim=0) if len(parts) > 1 else parts[0]
+            if len(parts) > 1:
+                merged[idx] = torch.cat(parts, dim=0)
+            else:
+                # A view of the graph output, which later replays overwrite.
+                merged[idx] = parts[0].clone() if clone else parts[0]
 
         out = [merged[i] for i in indices]
         for i, idx in enumerate(indices):

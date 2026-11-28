@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Tests for DPSupervisor: unit tests and lifecycle integration tests.
+"""Tests for DPSupervisor: unit tests and lifecycle integration tests.
 
 Lifecycle integration tests replace child vLLM servers with lightweight
 aiohttp "fake" servers controlled by the test, so the suite runs without GPUs.
@@ -48,7 +47,6 @@ _SUPERVISOR_PORT = 19256
 _CHILD_PORT_BASE = 18000
 _N_CHILDREN = 2
 _PROBE_INTERVAL = 1.0
-_POLL_INTERVAL = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -84,11 +82,11 @@ def _make_unit_args(**overrides) -> argparse.Namespace:
         "node_rank": 1,
         "tensor_parallel_size": 1,
         "pipeline_parallel_size": 1,
+        "prefill_context_parallel_size": 1,
         "uvicorn_log_level": "info",
         "shutdown_timeout": 5.0,
         "disable_uvicorn_access_log": False,
         "disable_access_log_for_endpoints": None,
-        "log_config_file": None,
     }
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -122,11 +120,11 @@ def _make_args(**overrides) -> argparse.Namespace:
         node_rank=0,
         tensor_parallel_size=1,
         pipeline_parallel_size=1,
+        prefill_context_parallel_size=1,
         uvicorn_log_level="warning",
         shutdown_timeout=0.0,
         disable_uvicorn_access_log=False,
         disable_access_log_for_endpoints=None,
-        log_config_file=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -253,9 +251,11 @@ async def test_shutdown_children_uses_engine_process_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ):
     supervisor = DPSupervisor(_make_unit_args(shutdown_timeout=0.0))
-    supervisor._processes = [
-        SimpleNamespace(name="APIServer_DPRank_4", pid=None, is_alive=lambda: False)
-    ]
+    monkeypatch.setattr(
+        supervisor,
+        "_processes",
+        [SimpleNamespace(name="APIServer_DPRank_4", pid=None, is_alive=lambda: False)],
+    )
     calls = []
     timeout_calls = []
 
@@ -287,12 +287,18 @@ async def test_handles_child_exit(
     monkeypatch: pytest.MonkeyPatch,
 ):
     supervisor = DPSupervisor(_make_unit_args())
-    supervisor._processes = [
-        SimpleNamespace(
-            name="APIServer_DPRank_4", exitcode=None, is_alive=lambda: True
-        ),
-        SimpleNamespace(name="APIServer_DPRank_5", exitcode=17, is_alive=lambda: False),
-    ]
+    monkeypatch.setattr(
+        supervisor,
+        "_processes",
+        [
+            SimpleNamespace(
+                name="APIServer_DPRank_4", exitcode=None, is_alive=lambda: True
+            ),
+            SimpleNamespace(
+                name="APIServer_DPRank_5", exitcode=17, is_alive=lambda: False
+            ),
+        ],
+    )
 
     async def fake_probe(*_args, **_kwargs) -> bool:
         return True
@@ -463,8 +469,7 @@ async def test_start_server_no_log_config_when_no_filter(monkeypatch):
 
 
 class MockVLLMServer:
-    """
-    Minimal FastAPI server that mimics one vLLM replica.
+    """Minimal FastAPI server that mimics one vLLM replica.
     GET /health returns 200 when healthy, 503 otherwise.
     Health state is toggled by the test via set_healthy().
     """
@@ -582,8 +587,7 @@ def launch_mock_vllm_with_drain(
 
 
 async def _poll_supervisor_health(expected_status: int, use_ssl: bool = False) -> bool:
-    """
-    GET /health on the supervisor once and check for expected_status.
+    """GET /health on the supervisor once and check for expected_status.
 
     Pass expected_status=-1 to assert the supervisor is not listening yet
     (a connection error is expected). The supervisor only starts its HTTP
@@ -634,7 +638,7 @@ async def _poll_until_api_server_running(
                     timeout=request_timeout,
                 ):
                     return
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except (TimeoutError, aiohttp.ClientError) as exc:
                 last_exc = exc
                 print("Test detected not started yet, sleeping for 1s")
                 remaining_s = deadline - time.monotonic()
@@ -705,8 +709,7 @@ async def _run_supervisor(
 
 @pytest.mark.asyncio
 async def test_basic_lifecycle(monkeypatch):
-    """
-    A) Supervisor is not listening while children are unhealthy.
+    """A) Supervisor is not listening while children are unhealthy.
     B) /health returns 200 once every child reports healthy.
     C) SIGTERM and shutdown
     """
@@ -777,8 +780,7 @@ async def test_basic_lifecycle_with_ssl(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_failed_startup(monkeypatch):
-    """
-    A) One of the vLLM servers crashes during startup.
+    """A) One of the vLLM servers crashes during startup.
     B) DPSupervisor detects this, and cleans up resources.
     """
     args = _make_args()
@@ -801,8 +803,7 @@ async def test_failed_startup(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_becomes_unhealthy(monkeypatch):
-    """
-    A) Supervisor is not listening while children are unhealthy.
+    """A) Supervisor is not listening while children are unhealthy.
     B) /health returns 200 once every child reports healthy.
     C) Child process becomes unhealthy.
     D) Detected and shutdown.
@@ -842,8 +843,7 @@ async def test_becomes_unhealthy(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_dp_server_fails(monkeypatch):
-    """
-    A) Supervisor is not listening while children are unhealthy.
+    """A) Supervisor is not listening while children are unhealthy.
     B) /health returns 200 once every child reports healthy.
     C) Child process fails.
     D) Detected and shutdown.
@@ -886,8 +886,7 @@ async def test_dp_server_fails(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_shutdown_timeout(monkeypatch: pytest.MonkeyPatch):
-    """
-    Child mock servers delay shutdown by 10s on SIGTERM (simulating in-flight
+    """Child mock servers delay shutdown by 10s on SIGTERM (simulating in-flight
     request drain).  The supervisor is configured with shutdown_timeout=10,
     so its total wait budget is 10 + CHILD_EXIT_GRACE_S seconds.  The
     children exit naturally within that window, so no force-kill should occur
