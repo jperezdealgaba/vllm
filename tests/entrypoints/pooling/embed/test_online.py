@@ -128,7 +128,7 @@ def test_pooling_rejects_request_tokenizer_options(server: RemoteOpenAIServer):
     assert response.json()["error"]["param"] == "chat_template_kwargs"
 
 
-def test_chat_pooling_uses_template_render_deadline():
+def test_pooling_preprocessing_times_out_for_text_input() -> None:
     args = [
         "--runner",
         "pooling",
@@ -137,31 +137,20 @@ def test_chat_pooling_uses_template_render_deadline():
         "--enforce-eager",
         "--max-model-len",
         "512",
-        "--trust-request-chat-template",
+        *ROCM_DETERMINISM_ARGS,
     ]
     with RemoteOpenAIServer(
-        MODEL_NAME, args, env_dict={"VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT": "1e-9"}
+        MODEL_NAME, args, env_dict={"VLLM_POOLING_PREPROCESSING_TIMEOUT_S": "1e-9"}
     ) as deadline_server:
         for endpoint in ("pooling", "v1/embeddings"):
-            response = requests.post(
-                deadline_server.url_for(endpoint),
-                json={
-                    "model": MODEL_NAME,
-                    "messages": [{"role": "user", "content": "Hello"}],
-                    "chat_template": DUMMY_CHAT_TEMPLATE,
-                },
-                timeout=10,
-            )
-            assert response.status_code == 500
-            message = response.json()["error"]["message"]
-            assert "Chat template rendering timed out" in message
-
             response = requests.post(
                 deadline_server.url_for(endpoint),
                 json={"model": MODEL_NAME, "input": "Hello"},
                 timeout=10,
             )
-            assert response.status_code == 200
+            assert response.status_code == 500, response.text
+            error = response.json()["error"]
+            assert "Pooling preprocessing timed out" in error["message"]
 
 
 @pytest.fixture(scope="module")

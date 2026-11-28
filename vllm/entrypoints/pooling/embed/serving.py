@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 from typing import TypeAlias, assert_never, cast
 
 from fastapi.responses import Response, StreamingResponse
 
+from vllm import envs
 from vllm.entrypoints.serve.utils.api_utils import create_json_response
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
@@ -52,7 +54,15 @@ class ServingEmbedding(PoolingServing):
         self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
     ):
         await super()._preprocessing(io_processor, ctx)
-        self.io_processor.maybe_pre_process_chunked(ctx)
+        if (
+            envs.VLLM_POOLING_PREPROCESSING_TIMEOUT_S > 0
+            and self.io_processor.enable_chunked_processing
+        ):
+            await asyncio.get_running_loop().run_in_executor(
+                self._executor, self.io_processor.maybe_pre_process_chunked, ctx
+            )
+        else:
+            self.io_processor.maybe_pre_process_chunked(ctx)
 
     def _build_response(
         self,

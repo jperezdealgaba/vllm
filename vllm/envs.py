@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     CUDA_VISIBLE_DEVICES: str | None = None
     VLLM_ENGINE_READY_TIMEOUT_S: int = 600
     VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT: float = 30.0
+    VLLM_POOLING_PREPROCESSING_TIMEOUT_S: float = 0.0
     VLLM_CHAT_TEMPLATE_FUEL: int = 500000
     VLLM_API_KEY: str | None = None
     VLLM_DEBUG_LOG_API_SERVER_RESPONSE: bool = False
@@ -833,6 +834,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Set to 0 to disable the timeout.
     "VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT": lambda: float(
         os.environ.get("VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT", "30")
+    ),
+    # Maximum wall-clock seconds for Python pooling API preprocessing, including
+    # time waiting for preprocessing workers. An expired request receives HTTP
+    # 500 before model execution. A running worker can finish after the deadline.
+    # Non-positive values disable the timeout (default: 0).
+    "VLLM_POOLING_PREPROCESSING_TIMEOUT_S": lambda: float(
+        os.environ.get("VLLM_POOLING_PREPROCESSING_TIMEOUT_S", "0")
     ),
     # Maximum template instructions (MiniJinja fuel) for rendering a
     # request-supplied chat template (--trust-request-chat-template) in the
@@ -2583,6 +2591,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_HTTP_MAX_REQUEST_BODY_SIZE",
         "VLLM_MAX_TOKENIZE_TOKENS",
+        "VLLM_POOLING_PREPROCESSING_TIMEOUT_S",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
         "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS",
         "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",

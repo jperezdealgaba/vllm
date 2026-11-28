@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from concurrent.futures import Executor
 from http import HTTPStatus
 from typing import ClassVar
@@ -19,6 +19,7 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.engine.types import AnyRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.exceptions import GenerationError
 from vllm.lora.request import LoRARequest
 from vllm.renderers.base import BaseRenderer
 from vllm.renderers.chat_utils import ChatTemplateConfig
@@ -29,7 +30,7 @@ from vllm.renderers.chat_utils.item_tracker import (
 from vllm.utils.async_utils import make_async, merge_async_iterators
 
 from ...serve.engine.protocol import ErrorResponse
-from ..types import AnyPoolingRequest, PoolingServeContext
+from ..types import AnyPoolingRequest, AnyRenderParam, PoolingServeContext
 from .io_processor import PoolingIOProcessor
 
 
@@ -73,7 +74,7 @@ class PoolingBaseServing(ABC, BaseServing):
     ) -> Response:
         io_processor = self.get_io_processor(request)
         ctx = await self._init_ctx(io_processor, request, raw_request)
-        await self._preprocessing(io_processor, ctx)
+        await self._preprocess_request(io_processor, ctx)
         generators = await self._prepare_generators(ctx)
         ctx.result_generator = merge_async_iterators(*generators)
         await self._collect_batch(ctx)
@@ -83,12 +84,50 @@ class PoolingBaseServing(ABC, BaseServing):
     def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
         raise NotImplementedError
 
+    async def _preprocess_request(
+        self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
+    ) -> None:
+        timeout = envs.VLLM_POOLING_PREPROCESSING_TIMEOUT_S
+        if timeout <= 0:
+            await self._preprocessing(io_processor, ctx)
+            return
+
+        loop = asyncio.get_running_loop()
+        expires_at = loop.time() + timeout
+        deadline = asyncio.timeout_at(expires_at)
+        try:
+            async with deadline:
+                await self._preprocessing(io_processor, ctx)
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+        else:
+            if loop.time() < expires_at:
+                return
+
+        raise GenerationError(
+            f"Pooling preprocessing timed out after {timeout:g} seconds."
+        )
+
+    @staticmethod
+    def _get_render_requests(
+        io_processor: PoolingIOProcessor,
+        ctx: PoolingServeContext,
+        budgets: MediaRequestBudgets,
+    ) -> Sequence[AnyRenderParam]:
+        with use_media_request_budgets(budgets):
+            return io_processor.get_request_factory_online(ctx)
+
     async def _preprocessing(
         self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
     ):
         budgets = MediaRequestBudgets()
-        with use_media_request_budgets(budgets):
-            requests = io_processor.get_request_factory_online(ctx)
+        if envs.VLLM_POOLING_PREPROCESSING_TIMEOUT_S > 0:
+            requests = await asyncio.get_running_loop().run_in_executor(
+                self._executor, self._get_render_requests, io_processor, ctx, budgets
+            )
+        else:
+            requests = self._get_render_requests(io_processor, ctx, budgets)
 
         if len(requests) == 0:
             raise ValueError("You must pass at least one prompt")
