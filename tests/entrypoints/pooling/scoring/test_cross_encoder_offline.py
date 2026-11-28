@@ -189,12 +189,14 @@ def test_max_tokens_per_doc(llm: LLM):
 
 def test_pooling_params(llm: LLM):
     def get_outputs(use_activation):
+        params = PoolingParams(use_activation=use_activation)
         outputs = llm.score(
             TEXTS_1[0],
             TEXTS_2[0],
-            pooling_params=PoolingParams(use_activation=use_activation),
+            pooling_params=params,
             use_tqdm=False,
         )
+        assert params.task is None, "LLM.score() mutated the caller's PoolingParams"
         return torch.tensor([x.outputs.score for x in outputs])
 
     default = get_outputs(use_activation=None)

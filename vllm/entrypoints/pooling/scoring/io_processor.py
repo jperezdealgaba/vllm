@@ -122,7 +122,10 @@ class ScoringIOProcessor(PoolingIOProcessor):
         return request.to_pooling_params(self.pooling_task)
 
     def _validate_text_length(self, num_chars: int, role: str) -> None:
-        max_chars = self.model_config.max_model_len * self.tokenizer.max_chars_per_token
+        # Allow room for a query and document before token truncation.
+        max_chars = (
+            2 * self.model_config.max_model_len * self.tokenizer.max_chars_per_token
+        )
         if num_chars > max_chars:
             raise VLLMValidationError(
                 f"Scoring {role} contains {num_chars} characters, exceeding "

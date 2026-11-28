@@ -561,7 +561,7 @@ def test_scoring_text_limit_is_independent_of_adjacent_block_boundaries(
         )
         assert prompt == "query:adocument:ab"
 
-    max_chars = processor.model_config.max_model_len
+    max_chars = 2 * processor.model_config.max_model_len
     max_chars *= processor.tokenizer.max_chars_per_token
     split_document: list[ScoreContentPartParam] = [
         {"type": "text", "text": "a" * (max_chars // 2)},
@@ -606,7 +606,7 @@ def test_scoring_detects_structured_content_with_saved_template(
     assert prompt == "query:adocument:bc"
 
     document = "bc"
-    max_chars = processor.model_config.max_model_len
+    max_chars = 2 * processor.model_config.max_model_len
     max_chars *= processor.tokenizer.max_chars_per_token
     # The inputs fit before the saved template adds the role labels.
     query = "a" * (max_chars - len(document))

@@ -347,7 +347,7 @@ async def test_score_api_max_model_len(server: RemoteOpenAIServer):
     assert score_response.status_code == 400
     assert "Please request a smaller truncation size." in score_response.text
 
-    max_chars = MAX_MODEL_LEN * get_tokenizer(MODEL_NAME).max_chars_per_token
+    max_chars = 2 * MAX_MODEL_LEN * get_tokenizer(MODEL_NAME).max_chars_per_token
     score_response = requests.post(
         server.url_for("score"),
         json={
