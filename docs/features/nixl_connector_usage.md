@@ -137,6 +137,15 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
   --decoder-ports 8200
 ```
 
+Expose only the trusted proxy to inference clients. Keep the prefiller,
+decoder, and NIXL side-channel endpoints on an isolated network. The proxy
+must discard any client-supplied `kv_transfer_params` and construct replacement
+parameters from its routing configuration or responses from trusted workers.
+See the [inter-node communication security guide](../usage/security.md#inter-node-communication).
+
+NIXL rejects remote topologies with more than 1,024 tensor and pipeline
+parallel rank combinations (TP × PP) before opening a handshake connection.
+
 ### Decode context parallelism
 
 NIXL pull transfers with `--decode-context-parallel-size` greater than 1 require an MLA model. When `--cp-kv-cache-interleave-size` is omitted, vLLM resolves it from the global KV cache groups before profiling. Explicit values are preserved and must divide the cache block size without exceeding it. For a block size of 16, explicit values of 1 and 8 are valid; 3 and 32 are rejected under either connector name.

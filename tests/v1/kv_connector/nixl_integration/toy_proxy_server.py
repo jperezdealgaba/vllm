@@ -213,6 +213,7 @@ async def stream_service_response(
 async def _handle_completions(api: str, request: Request):
     try:
         req_data = await request.json()
+        req_data.pop("kv_transfer_params", None)
         request_id = str(uuid.uuid4())
 
         # Get the next prefill client in round-robin fashion

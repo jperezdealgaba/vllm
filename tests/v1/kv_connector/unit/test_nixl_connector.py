@@ -4999,110 +4999,66 @@ def test_compatibility_hash_validation(
             assert len(result) == 1
 
 
-def test_handshake_validates_peer_topology_before_expanding_rank_list(monkeypatch):
-    worker = object.__new__(NixlConnectorWorker)
-    worker._is_csa_linear = False
-    worker.use_host_buffer = True
-    worker.transfer_topo = MagicMock()
-    worker.pcp_size = 1
-    worker.dcp_size = 1
-    worker.compat_hash = "compat"
-    worker.enforce_compat_hash = True
-    worker._validate_remote_parallel_config = MagicMock()
-
-    remote_metadata = NixlAgentMetadata(
-        engine_id="remote",
-        agent_metadata=b"",
-        kv_caches_base_addr=[],
-        device_id=0,
-        num_blocks=0,
-        block_lens=[],
-        block_strides=[],
-        kv_cache_layout="LBHNC",
-        block_size=16,
-        ssm_sizes=(0, 0),
-        attn_backend_name="test",
-        physical_blocks_per_logical_kv_block=1,
-        tp_size=1,
-        pp_size=1,
+@pytest.mark.parametrize(
+    ("remote_tp_size", "remote_dcp_size", "remote_pp_size", "error"),
+    [
+        (0, 1, 1, "TP size must be a positive integer"),
+        (1, True, 1, "DCP size must be a positive integer"),
+        (1, 1, -1, "PP size must be a positive integer"),
+        (4, 2, 1, "DCP size must be 1 or equal to the TP size"),
+        (1025, 1, 1, "maximum of 1024 handshake ranks"),
+        (1, 1, 1025, "maximum of 1024 handshake ranks"),
+        (33, 1, 32, "maximum of 1024 handshake ranks"),
+        (32, 1, 32, None),
+    ],
+)
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_handshake_bounds_remote_topology_before_opening_socket(
+    default_vllm_config,
+    dist_init,
+    remote_tp_size,
+    remote_dcp_size,
+    remote_pp_size,
+    error,
+):
+    block_size = maybe_update_block_size(16)
+    config = create_vllm_config(block_size=block_size)
+    kv_cache_config = make_kv_cache_config(block_size=block_size, num_blocks=2)
+    connector = NixlConnector(config, KVConnectorRole.WORKER, kv_cache_config)
+    worker = connector.connector_worker
+    kv_cache_group = kv_cache_config.kv_cache_groups[0]
+    spec = cast(AttentionSpec, uniform_spec(kv_cache_group))
+    shape = compute_layer_kv_cache_shape_bytes(spec, kv_cache_config.num_blocks)
+    connector.register_kv_caches(
+        {
+            name: torch.zeros(*shape, dtype=torch.int8).view(spec.dtype)
+            for name in kv_cache_group.layer_names
+        }
     )
-    handshake_payload = NixlHandshakePayload(
-        compatibility_hash="compat",
-        agent_metadata_bytes=msgspec.msgpack.encode(remote_metadata),
-    )
-    mock_socket = MagicMock()
-    mock_socket.recv_multipart.return_value = [
-        msgspec.msgpack.encode(handshake_payload),
-        msgspec.msgpack.encode(time.perf_counter()),
-    ]
-    zmq_context = MagicMock()
-    zmq_context.__enter__.return_value = mock_socket
-    monkeypatch.setattr(nixl.base_worker, "zmq_ctx", lambda *_: zmq_context)
-    monkeypatch.setattr(nixl.base_worker, "make_zmq_path", lambda *_: "tcp://test")
 
-    with pytest.raises(ValueError, match="topology mismatch"):
-        worker._nixl_handshake(
-            host="localhost",
-            port=1234,
-            remote_tp_size=5_000_000,
-            expected_engine_id="remote",
+    with patch.object(
+        nixl.base_worker,
+        "zmq_ctx",
+        side_effect=ConnectionError("test peer unavailable"),
+    ) as open_socket:
+        expected = (
+            pytest.raises(ValueError, match=error)
+            if error is not None
+            else pytest.raises(ConnectionError, match="test peer unavailable")
         )
-    worker.transfer_topo.handshake_target_ranks.assert_not_called()
-
-
-def test_handshake_expands_ranks_after_peer_topology_validation(monkeypatch):
-    worker = object.__new__(NixlConnectorWorker)
-    worker._is_csa_linear = False
-    worker.use_host_buffer = True
-    worker.transfer_topo = MagicMock()
-    worker.transfer_topo.handshake_target_ranks.return_value = [0, 1]
-    worker.pcp_size = 1
-    worker.dcp_size = 1
-    worker.compat_hash = "compat"
-    worker.enforce_compat_hash = True
-    worker._validate_remote_parallel_config = MagicMock()
-    worker.add_remote_agent = MagicMock(return_value="agent")
-
-    remote_metadata = NixlAgentMetadata(
-        engine_id="remote",
-        agent_metadata=b"",
-        kv_caches_base_addr=[],
-        device_id=0,
-        num_blocks=0,
-        block_lens=[],
-        block_strides=[],
-        kv_cache_layout="LBHNC",
-        block_size=16,
-        ssm_sizes=(0, 0),
-        attn_backend_name="test",
-        physical_blocks_per_logical_kv_block=1,
-        tp_size=2,
-        pp_size=1,
-    )
-    handshake_payload = NixlHandshakePayload(
-        compatibility_hash="compat",
-        agent_metadata_bytes=msgspec.msgpack.encode(remote_metadata),
-    )
-    mock_socket = MagicMock()
-    mock_socket.recv_multipart.return_value = [
-        msgspec.msgpack.encode(handshake_payload),
-        msgspec.msgpack.encode(time.perf_counter()),
-    ]
-    zmq_context = MagicMock()
-    zmq_context.__enter__.return_value = mock_socket
-    monkeypatch.setattr(nixl.base_worker, "zmq_ctx", lambda *_: zmq_context)
-    monkeypatch.setattr(nixl.base_worker, "make_zmq_path", lambda *_: "tcp://test")
-
-    agents, _ = worker._nixl_handshake(
-        host="localhost",
-        port=1234,
-        remote_tp_size=2,
-        expected_engine_id="remote",
-    )
-
-    assert agents == {(0, 0): "agent", (0, 1): "agent"}
-    worker.transfer_topo.handshake_target_ranks.assert_called_once_with(2, 1)
-    assert mock_socket.recv_multipart.call_count == 2
+        with expected:
+            worker._nixl_handshake(
+                host="localhost",
+                port=1234,
+                remote_tp_size=remote_tp_size,
+                expected_engine_id="remote",
+                remote_dcp_size=remote_dcp_size,
+                remote_pp_size=remote_pp_size,
+            )
+        assert open_socket.call_count == (error is None)
 
 
 @pytest.mark.parametrize(

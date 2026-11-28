@@ -117,6 +117,7 @@ _SHARED_REGION_GROUP_ID = -1
 _INVALID_PEER_MIN_BACKOFF_S = 1.0
 _INVALID_PEER_MAX_BACKOFF_S = 60.0
 _MAX_HYBRID_BLOCK_SPLIT = 128
+_MAX_REMOTE_HANDSHAKE_RANKS = 1024
 
 
 def _region_sort_key(layer_name: str) -> tuple[tuple[int, int | str], ...]:
@@ -1275,6 +1276,24 @@ class NixlBaseConnectorWorker:
         notif_agents_only: bool = False,
     ) -> tuple[dict[tuple[int, int], str], float]:
         """Do a NIXL handshake with a remote instance."""
+        for name, size in (
+            ("TP", remote_tp_size),
+            ("DCP", remote_dcp_size),
+            ("PP", remote_pp_size),
+        ):
+            if type(size) is not int or size < 1:
+                raise ValueError(f"Remote NIXL {name} size must be a positive integer.")
+
+        if remote_dcp_size not in (1, remote_tp_size):
+            raise ValueError("Remote NIXL DCP size must be 1 or equal to the TP size.")
+
+        # Each remote PP stage can require a handshake with every remote TP rank.
+        if remote_tp_size > _MAX_REMOTE_HANDSHAKE_RANKS // remote_pp_size:
+            raise ValueError(
+                "Remote NIXL TP and PP sizes exceed the maximum of "
+                f"{_MAX_REMOTE_HANDSHAKE_RANKS} handshake ranks."
+            )
+
         if self._is_csa_linear:
             self._validate_csa_linear_tp_layout(remote_tp_size)
 
@@ -1296,29 +1315,9 @@ class NixlBaseConnectorWorker:
         # local rank will read from. Note that With homogeneous TP,
         # this happens to be the same single rank_i.
         assert self.transfer_topo is not None
-        for name, size in (
-            ("TP", remote_tp_size),
-            ("DCP", remote_dcp_size),
-            ("PP", remote_pp_size),
-        ):
-            if type(size) is not int or size < 1:
-                raise ValueError(f"Invalid remote {name} size: {size!r}")
-
-        # Probe a known rank before deriving a list from peer-provided topology.
-        # This generator resumes only after rank (0, 0) has been validated.
-        p_remote_ranks: list[int] | None = None
-
-        def remote_rank_pairs() -> Iterator[tuple[int, int]]:
-            yield 0, 0
-            assert p_remote_ranks is not None
-            yield from (
-                (pp_rank, tp_rank)
-                for pp_rank, tp_rank in itertools.product(
-                    range(remote_pp_size), p_remote_ranks
-                )
-                if (pp_rank, tp_rank) != (0, 0)
-            )
-
+        p_remote_ranks = self.transfer_topo.handshake_target_ranks(
+            remote_tp_size, remote_dcp_size
+        )
         remote_rank_to_agent_name: dict[tuple[int, int], str] = {}
         path = make_zmq_path("tcp", host, port)
         # Clock offset to the peer, estimated from the handshake round-trip.
@@ -1328,7 +1327,9 @@ class NixlBaseConnectorWorker:
         best_offset: float | None = None
 
         with zmq_ctx(zmq.REQ, path) as sock:
-            for remote_pp_rank, remote_rank in remote_rank_pairs():
+            for remote_pp_rank, remote_rank in itertools.product(
+                range(remote_pp_size), p_remote_ranks
+            ):
                 logger.debug(
                     "Querying metadata on path: %s at remote pp rank %s, tp rank %s",
                     path,
@@ -1408,32 +1409,6 @@ class NixlBaseConnectorWorker:
                     ) from e
 
                 self._validate_remote_parallel_config(metadata)
-
-                if p_remote_ranks is None:
-                    actual_topology = (
-                        metadata.tp_size,
-                        metadata.dcp_size,
-                        metadata.pp_size,
-                    )
-                    requested_topology = (
-                        remote_tp_size,
-                        remote_dcp_size,
-                        remote_pp_size,
-                    )
-                    if actual_topology != requested_topology:
-                        raise ValueError(
-                            "Remote NIXL topology mismatch: request advertised "
-                            f"TP/DCP/PP={requested_topology}, but peer reports "
-                            f"TP/DCP/PP={actual_topology}."
-                        )
-                    p_remote_ranks = self.transfer_topo.handshake_target_ranks(
-                        remote_tp_size, remote_dcp_size
-                    )
-
-                # The rank-0 handshake may only be a topology probe.
-                assert p_remote_ranks is not None
-                if remote_rank not in p_remote_ranks:
-                    continue
 
                 # Ensure engine id matches.
                 if metadata.engine_id != expected_engine_id:
@@ -2144,8 +2119,6 @@ class NixlBaseConnectorWorker:
                 for name in names
             },
             packed_member_layouts=self._packed_member_layouts,
-            tp_size=self.transfer_tp_size,
-            pp_size=self.pp_size,
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
